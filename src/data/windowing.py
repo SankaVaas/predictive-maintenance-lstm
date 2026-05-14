@@ -39,35 +39,40 @@ class CMAPSSDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-# src/data/windowing.py  — replace get_loaders entirely
 def get_loaders(train_df, test_df, feature_cols,
-                seq_len=30, batch_size=256, val_split=0.1):
+                seq_len=30, batch_size=256, val_split=0.1,
+                stratified=False):
 
-    X_train, y_train = make_windows(train_df, feature_cols, seq_len)
+    if stratified:
+        all_units   = sorted(train_df["unit_id"].unique())
+        n_val_units = max(1, int(len(all_units) * val_split))
+        val_units   = all_units[-n_val_units:]
+        train_units = all_units[:-n_val_units]
+        tr_df  = train_df[train_df["unit_id"].isin(train_units)]
+        vl_df  = train_df[train_df["unit_id"].isin(val_units)]
+        X_train, y_train = make_windows(tr_df, feature_cols, seq_len)
+        X_val,   y_val   = make_windows(vl_df, feature_cols, seq_len)
+        print(f"Train engines : {len(train_units)}  |  Val engines: {n_val_units}")
+    else:
+        X_all, y_all = make_windows(train_df, feature_cols, seq_len)
+        n_val        = int(len(X_all) * val_split)
+        X_val,   y_val   = X_all[-n_val:],  y_all[-n_val:]
+        X_train, y_train = X_all[:-n_val],  y_all[:-n_val]
 
-    # validation split
-    n_val = int(len(X_train) * val_split)
-    X_val,   y_val   = X_train[-n_val:],  y_train[-n_val:]
-    X_train, y_train = X_train[:-n_val],  y_train[:-n_val]
-
-    # ── test: build one window per engine manually ────────────────────────────
-    # Take the last seq_len rows of each engine; label = RUL_true from file
+    # test — last window per engine
     rul_true = (
-        test_df[test_df["RUL"] != -1]          # rows that have a real label
-        .groupby("unit_id")["RUL"].first()      # one RUL per engine
+        test_df[test_df["RUL"] != -1]
+        .groupby("unit_id")["RUL"].first()
     )
-
     X_test_list, y_test_list = [], []
     for unit_id, group in test_df.groupby("unit_id"):
-        data = group[feature_cols].values        # (T, F)
+        data = group[feature_cols].values
         if unit_id not in rul_true.index:
             continue
-        # pad with zeros if engine has fewer than seq_len cycles
         if len(data) < seq_len:
-            pad = np.zeros((seq_len - len(data), data.shape[1]), dtype=np.float32)
+            pad  = np.zeros((seq_len - len(data), data.shape[1]), dtype=np.float32)
             data = np.vstack([pad, data])
-        window = data[-seq_len:]                 # last seq_len cycles
-        X_test_list.append(window)
+        X_test_list.append(data[-seq_len:])
         y_test_list.append(rul_true[unit_id])
 
     X_test = np.array(X_test_list, dtype=np.float32)
