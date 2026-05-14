@@ -6,16 +6,27 @@ from pathlib import Path
 import numpy as np
 import mlflow
 import mlflow.pytorch
-from tqdm import tqdm
-
 from src.models.lstm import PredictiveMaintenanceLSTM
-
+from src.models.loss import HuberAsymmetricLoss, AsymmetricMSELoss
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def rmse(preds: torch.Tensor, targets: torch.Tensor) -> float:
     return torch.sqrt(nn.functional.mse_loss(preds, targets)).item()
+
+
+def get_criterion(config: dict):
+    name = config.get("loss", "mse")
+    if name == "huber_asymmetric":
+        return HuberAsymmetricLoss(
+            delta=config.get("huber_delta", 15.0),
+            over_penalty=config.get("over_penalty", 1.5)
+        )
+    elif name == "asymmetric_mse":
+        return AsymmetricMSELoss(over_penalty=config.get("over_penalty", 2.0))
+    else:
+        return nn.MSELoss()
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
@@ -27,7 +38,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
         pred = model(X)
         loss = criterion(pred, y)
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # prevent exploding grads
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item() * len(y)
     return total_loss / len(loader.dataset)
@@ -61,16 +72,20 @@ def train(train_loader: DataLoader, val_loader: DataLoader,
     optimizer = torch.optim.Adam(model.parameters(),
                                  lr=config["lr"],
                                  weight_decay=config["weight_decay"])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=5, factor=0.5, verbose=True
+
+    # cosine annealing — LR decays smoothly to near-zero, no sudden drops
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config["epochs"], eta_min=1e-6
     )
-    criterion = nn.MSELoss()
 
-    best_val_rmse = float("inf")
+    criterion = get_criterion(config)
+
+    best_val_rmse    = float("inf")
     patience_counter = 0
-    best_weights = None
+    best_weights     = None
 
-    print(f"\nTraining on: {DEVICE}")
+    print(f"\nTraining on : {DEVICE}")
+    print(f"Loss        : {config.get('loss', 'mse')}")
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}\n")
 
     mlflow.set_experiment("predictive_maintenance")
@@ -78,18 +93,17 @@ def train(train_loader: DataLoader, val_loader: DataLoader,
         mlflow.log_params(config)
 
         for epoch in range(1, config["epochs"] + 1):
-            train_loss           = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE)
-            val_loss, val_rmse   = evaluate(model, val_loader, criterion, DEVICE)
-            scheduler.step(val_rmse)
+            train_loss          = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE)
+            val_loss, val_rmse  = evaluate(model, val_loader, criterion, DEVICE)
+            scheduler.step()
 
             mlflow.log_metrics({"train_loss": train_loss,
-                                "val_loss":   val_loss,
-                                "val_rmse":   val_rmse}, step=epoch)
+                                 "val_loss":   val_loss,
+                                 "val_rmse":   val_rmse}, step=epoch)
 
             print(f"Epoch {epoch:3d}  |  train_loss: {train_loss:.4f}  "
                   f"val_loss: {val_loss:.4f}  val_rmse: {val_rmse:.4f}")
 
-            # early stopping
             if val_rmse < best_val_rmse - 0.001:
                 best_val_rmse    = val_rmse
                 best_weights     = {k: v.clone() for k, v in model.state_dict().items()}
@@ -97,14 +111,13 @@ def train(train_loader: DataLoader, val_loader: DataLoader,
             else:
                 patience_counter += 1
                 if patience_counter >= config["patience"]:
-                    print(f"\nEarly stopping at epoch {epoch}  |  best val RMSE: {best_val_rmse:.4f}")
+                    print(f"\nEarly stopping at epoch {epoch}  "
+                          f"|  best val RMSE: {best_val_rmse:.4f}")
                     break
 
-        # restore best weights
         model.load_state_dict(best_weights)
         mlflow.pytorch.log_model(model, "model")
 
-        # save checkpoint
         ckpt_path = Path("data/processed/best_model.pt")
         torch.save({"model_state": best_weights,
                     "config":      config,
