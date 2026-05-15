@@ -37,6 +37,32 @@ class CMAPSSDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
+    
+# src/data/windowing.py — add this function, call it inside get_loaders
+
+def augment_short_life(train_df: pd.DataFrame, feature_cols: list,
+                        seq_len: int, lifetime_threshold: int = 150,
+                        oversample_factor: int = 3) -> tuple:
+    """
+    Oversample windows from engines with short lifetimes.
+    These are underrepresented and cause over-prediction on test engines like #67.
+    """
+    max_cycles = train_df.groupby("unit_id")["cycle"].max()
+    short_units = max_cycles[max_cycles < lifetime_threshold].index.tolist()
+
+    if not short_units:
+        return np.array([]), np.array([])
+
+    short_df = train_df[train_df["unit_id"].isin(short_units)]
+    X_short, y_short = make_windows(short_df, feature_cols, seq_len)
+
+    # repeat oversample_factor times
+    X_aug = np.tile(X_short, (oversample_factor, 1, 1))
+    y_aug = np.tile(y_short, oversample_factor)
+
+    print(f"  Short-life engines (<{lifetime_threshold} cycles): {len(short_units)} engines")
+    print(f"  Augmented windows added: {len(X_aug):,}  (factor={oversample_factor}x)")
+    return X_aug, y_aug
 
 
 def get_loaders(train_df, test_df, feature_cols,
@@ -59,6 +85,19 @@ def get_loaders(train_df, test_df, feature_cols,
         X_val,   y_val   = X_all[-n_val:],  y_all[-n_val:]
         X_train, y_train = X_all[:-n_val],  y_all[:-n_val]
 
+    # augment short-life engines
+    X_aug, y_aug = augment_short_life(train_df, feature_cols, seq_len,
+                                       lifetime_threshold=150, oversample_factor=3)
+    if len(X_aug):
+        X_train = np.concatenate([X_train, X_aug], axis=0)
+        y_train = np.concatenate([y_train, y_aug], axis=0)
+
+        # re-shuffle after augmentation
+        idx     = np.random.permutation(len(X_train))
+        X_train = X_train[idx]
+        y_train = y_train[idx]
+        print(f"  Train windows after augmentation: {len(X_train):,}")
+        
     # test — last window per engine
     rul_true = (
         test_df[test_df["RUL"] != -1]
