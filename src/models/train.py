@@ -16,12 +16,21 @@ def rmse(preds: torch.Tensor, targets: torch.Tensor) -> float:
     return torch.sqrt(nn.functional.mse_loss(preds, targets)).item()
 
 
-def get_criterion(config: dict):
+from src.models.loss import HuberAsymmetricLoss, AsymmetricMSELoss, WeightedHuberAsymmetricLoss
+
+def get_criterion(config):
     name = config.get("loss", "mse")
-    if name == "huber_asymmetric":
+    if name == "weighted_huber":
+        return WeightedHuberAsymmetricLoss(
+            delta             = config.get("huber_delta",       12.0),
+            over_penalty      = config.get("over_penalty",       1.5),
+            low_rul_threshold = config.get("low_rul_threshold",  50),
+            low_rul_weight    = config.get("low_rul_weight",     3.0),
+        )
+    elif name == "huber_asymmetric":
         return HuberAsymmetricLoss(
-            delta=config.get("huber_delta", 15.0),
-            over_penalty=config.get("over_penalty", 1.5)
+            delta        = config.get("huber_delta",  12.0),
+            over_penalty = config.get("over_penalty",  1.5),
         )
     elif name == "asymmetric_mse":
         return AsymmetricMSELoss(over_penalty=config.get("over_penalty", 2.0))
