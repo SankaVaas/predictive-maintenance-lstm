@@ -1,24 +1,24 @@
-# run_training.py
+# run_training.py  — clean, no calibration
 from src.data.preprocess  import preprocess
 from src.data.windowing    import get_loaders
 from src.models.train      import train
 from src.models.evaluate   import evaluate_test
-from src.models.calibrate  import (collect_predictions, fit_calibrator,
-                                    save_calibrator, calibrate)
 
 CONFIG = {
-    "hidden_size"  : 128,
-    "num_layers"   : 2,
-    "dropout"      : 0.3,
-    "lr"           : 5e-4,
-    "weight_decay" : 1e-5,
-    "epochs"       : 120,
-    "patience"     : 15,
-    "seq_len"      : 50,
-    "batch_size"   : 256,
-    "loss"         : "huber_asymmetric",
-    "over_penalty" : 1.5,
-    "huber_delta"  : 12.0,
+    "hidden_size"       : 128,
+    "num_layers"        : 2,
+    "dropout"           : 0.3,
+    "lr"                : 5e-4,
+    "weight_decay"      : 1e-5,
+    "epochs"            : 120,
+    "patience"          : 15,
+    "seq_len"           : 50,
+    "batch_size"        : 256,
+    "loss"              : "weighted_huber",
+    "over_penalty"      : 1.5,
+    "huber_delta"       : 12.0,
+    "low_rul_threshold" : 50,
+    "low_rul_weight"    : 3.0,
 }
 
 if __name__ == "__main__":
@@ -32,12 +32,4 @@ if __name__ == "__main__":
     )
 
     model = train(train_loader, val_loader, n_features, CONFIG)
-
-    # fit bias calibrator on val
-    print("\nFitting bias calibrator on val set...")
-    raw_val, val_targets = collect_predictions(model, val_loader)
-    calibrator = fit_calibrator(raw_val, val_targets)
-    save_calibrator(calibrator)
-
-    # evaluate both ways
-    evaluate_test(model, test_loader, calibrator=calibrator)
+    evaluate_test(model, test_loader)
